@@ -596,6 +596,7 @@ local function start_server()
         console:error("Failed to bind to port " .. PORT)
         return
     end
+    server:listen(1)
 
     console:log("MCP Server listening on 127.0.0.1:" .. PORT)
     console:log("Waiting for Python MCP client to connect...")
