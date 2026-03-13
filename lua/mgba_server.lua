@@ -564,21 +564,8 @@ local function on_frame()
         send_response(response)
     end
 
-    -- Poll for incoming data
+    -- Process any buffered data (data arrives via socket "received" callback)
     if client then
-        while client:hasdata() do
-            local data, err = client:receive(4096)
-            if data then
-                buffer = buffer .. data
-            else
-                if err then
-                    console:log("Client disconnected: " .. tostring(err))
-                    client = nil
-                    buffer = ""
-                end
-                break
-            end
-        end
         process_buffer()
     end
 end
@@ -613,13 +600,29 @@ local function start_server()
     console:log("MCP Server listening on 127.0.0.1:" .. PORT)
     console:log("Waiting for Python MCP client to connect...")
 
-    -- Accept connections
+    -- Accept connections via event callback
     server:add("received", function()
         if not client then
             client = server:accept()
             if client then
                 console:log("MCP client connected!")
                 buffer = ""
+                -- Register receive callback on the client socket
+                client:add("received", function()
+                    local data, err = client:receive(4096)
+                    if data then
+                        buffer = buffer .. data
+                    elseif err then
+                        console:log("Client disconnected: " .. tostring(err))
+                        client = nil
+                        buffer = ""
+                    end
+                end)
+                client:add("error", function()
+                    console:log("Client socket error, disconnecting")
+                    client = nil
+                    buffer = ""
+                end)
             end
         end
     end)
