@@ -17,13 +17,28 @@ from .game_state import (
     parse_pokemon,
 )
 
+# Unused location imports removed — navigation is purely visual
+
 mcp = FastMCP(
     "mGBA Pokemon FireRed",
     instructions=(
-        "MCP server for playing Pokemon Fire Red through the mGBA emulator. "
-        "Use press_button/press_buttons to control the game, get_screenshot to see "
-        "the current screen, and get_game_state/get_party/get_battle_state to read "
-        "game data from memory. Every button press returns a screenshot showing the result."
+        "MCP server for playing Pokemon Fire Red through the mGBA emulator.\n\n"
+        "HOW TO PLAY:\n"
+        "- Navigate the world VISUALLY using screenshots. Look at what's on screen to decide where to go.\n"
+        "- Read dialog boxes from the screenshots — press A to advance text, read each screenshot carefully.\n"
+        "- Use get_game_state to check your party's HP, moves, and battle status (RAM data).\n"
+        "- Every button press returns a screenshot — always look at it before deciding your next action.\n\n"
+        "CONTROLS:\n"
+        "- D-pad (UP/DOWN/LEFT/RIGHT): Move character, navigate menus\n"
+        "- A: Confirm, talk to NPCs, advance dialog\n"
+        "- B: Cancel, run in field (hold), speed through text\n"
+        "- START: Open menu\n"
+        "- SELECT: Use registered key item\n\n"
+        "TIPS:\n"
+        "- When text appears on screen, press A repeatedly to read through it all.\n"
+        "- In battle: read the screenshot to see the battle menu, then choose FIGHT/BAG/POKEMON/RUN.\n"
+        "- The screenshot IS your eyes. Describe what you see before acting.\n"
+        "- Be entertaining and share your thoughts — you're playing for a YouTube audience!\n"
     ),
 )
 
@@ -59,16 +74,11 @@ def _parse_hex_bytes(hex_string: str) -> bytes:
 
 
 def _build_game_state(raw: dict) -> dict:
-    """Parse raw game state response into structured data."""
-    state = {}
+    """Parse raw game state response into structured data.
 
-    # Location
-    state["location"] = {
-        "x": raw.get("player_x", 0),
-        "y": raw.get("player_y", 0),
-        "bank": raw.get("map_bank", 0),
-        "number": raw.get("map_num", 0),
-    }
+    Only party, battle, badges, and money — navigation is purely visual.
+    """
+    state = {}
 
     # Money (XOR decrypted on Lua side)
     state["money"] = raw.get("money", 0)
@@ -107,6 +117,9 @@ async def press_button(
     hold_frames: int = 10,
 ) -> Image:
     """Press a GBA button and return a screenshot of the result.
+
+    ALWAYS look at the returned screenshot to see what happened before deciding
+    your next action. The screenshot is your only way to see the game world.
 
     Args:
         button: The button to press (A, B, START, SELECT, UP, DOWN, LEFT, RIGHT, L, R)
@@ -166,16 +179,22 @@ async def press_buttons(
 
 @mcp.tool()
 async def get_screenshot() -> Image:
-    """Capture the current game screen without pressing any buttons."""
+    """Capture the current game screen without pressing any buttons.
+
+    Use this to see where you are, read dialog text, check menus, and
+    understand the game world. This is your primary way to navigate.
+    """
     return await _get_screenshot()
 
 
 @mcp.tool()
 async def get_game_state() -> str:
-    """Read the full game state from RAM.
+    """Read party and progress data from RAM.
 
-    Returns a summary of: player location, badges, money, party Pokemon (species,
-    level, HP, moves), and whether a battle is active.
+    Returns: badges earned, money, party Pokemon (species, level, HP, moves,
+    status conditions), and battle state (enemy Pokemon info if in battle).
+
+    NOTE: This does NOT tell you where you are — use get_screenshot for navigation.
     """
     raw = await _read_game_state_raw()
     state = _build_game_state(raw)

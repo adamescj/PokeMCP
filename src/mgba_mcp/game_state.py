@@ -290,19 +290,15 @@ def parse_badges(flags_data: bytes) -> list[str]:
 
 
 def format_game_state(state: dict) -> str:
-    """Format parsed game state into a readable string for Claude."""
+    """Format parsed game state into a readable string for Claude.
+
+    Navigation is purely visual (screenshots). This only shows party/battle/progress data.
+    """
     lines = []
 
-    # Location
-    location = state.get("location", {})
-    map_name = get_map_name(location.get("bank", 0), location.get("number", 0))
-    lines.append(f"Location: {map_name} at ({location.get('x', '?')}, {location.get('y', '?')})")
-
-    # Badges
+    # Progress
     badges = state.get("badges", [])
     lines.append(f"Badges: {len(badges)}/8 [{', '.join(badges) if badges else 'None'}]")
-
-    # Money
     lines.append(f"Money: ${state.get('money', 0):,}")
 
     # Party
@@ -311,8 +307,23 @@ def format_game_state(state: dict) -> str:
     for i, p in enumerate(party, 1):
         move_names = ", ".join(m["name"] for m in p.get("moves", []))
         status = ""
-        if p.get("status_condition", 0) != 0:
-            status = " [STATUS]"
+        sc = p.get("status_condition", 0)
+        if sc != 0:
+            # Decode status condition flags
+            statuses = []
+            if sc & 0x7:
+                statuses.append("SLP")
+            if sc & 0x8:
+                statuses.append("PSN")
+            if sc & 0x10:
+                statuses.append("BRN")
+            if sc & 0x20:
+                statuses.append("FRZ")
+            if sc & 0x40:
+                statuses.append("PAR")
+            if sc & 0x80:
+                statuses.append("TOX")
+            status = f" [{'/'.join(statuses)}]" if statuses else " [STATUS]"
         lines.append(
             f"  {i}. {p['species']} Lv.{p['level']} "
             f"HP: {p['current_hp']}/{p['max_hp']}{status} "
@@ -321,13 +332,16 @@ def format_game_state(state: dict) -> str:
 
     # Battle state
     if state.get("in_battle"):
-        lines.append(f"\nBATTLE ACTIVE")
+        lines.append(f"\n** BATTLE ACTIVE **")
         enemy = state.get("enemy_pokemon")
         if enemy:
             lines.append(
                 f"  Enemy: {enemy['species']} Lv.{enemy['level']} "
                 f"HP: {enemy['current_hp']}/{enemy['max_hp']}"
             )
+            if enemy.get("moves"):
+                enemy_moves = ", ".join(m["name"] for m in enemy["moves"])
+                lines.append(f"  Enemy moves: [{enemy_moves}]")
     else:
         lines.append("\nNot in battle")
 

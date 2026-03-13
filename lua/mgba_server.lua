@@ -387,15 +387,9 @@ end
 local function handle_get_game_state(request)
     local result = { id = request.id }
 
-    -- Read SaveBlock1 pointer and dereference
+    -- Read SaveBlock pointers (no location data — navigation is visual only)
     local sb1_ptr = emu:read32(ADDR.SAVEBLOCK1_PTR)
     local sb2_ptr = emu:read32(ADDR.SAVEBLOCK2_PTR)
-
-    -- Player position
-    result.player_x = emu:read16(sb1_ptr + ADDR.SB1_PLAYER_X)
-    result.player_y = emu:read16(sb1_ptr + ADDR.SB1_PLAYER_Y)
-    result.map_num = emu:read8(sb1_ptr + ADDR.SB1_MAP_NUM)
-    result.map_bank = emu:read8(sb1_ptr + ADDR.SB1_MAP_BANK)
 
     -- Money (XOR encrypted) - Lua 5.4 uses ~ for XOR
     local money_raw = emu:read32(sb1_ptr + ADDR.SB1_MONEY)
