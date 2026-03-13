@@ -568,9 +568,27 @@ local function on_frame()
         send_response(response)
     end
 
-    -- Process any buffered data (data arrives via socket "received" callback)
+    -- Poll for incoming data directly (more reliable than socket callbacks)
     if client then
+        local ok, data = pcall(function() return client:receive(4096) end)
+        if ok and data then
+            buffer = buffer .. data
+        elseif not ok then
+            console:log("Client receive error, disconnecting")
+            client = nil
+            buffer = ""
+        end
         process_buffer()
+    end
+
+    -- Try to accept new connection if no client
+    if not client and server then
+        local ok, new_client = pcall(function() return server:accept() end)
+        if ok and new_client then
+            client = new_client
+            buffer = ""
+            console:log("MCP client connected!")
+        end
     end
 end
 
@@ -604,41 +622,7 @@ local function start_server()
 
     console:log("MCP Server listening on 127.0.0.1:" .. PORT)
     console:log("Waiting for Python MCP client to connect...")
-
-    -- Accept connections via event callback
-    server:add("received", function()
-        if not client then
-            client = server:accept()
-            if client then
-                console:log("MCP client connected!")
-                buffer = ""
-                -- Register receive callback on the client socket
-                client:add("received", function()
-                    if not client then return end
-                    local ok, data, err = pcall(function() return client:receive(4096) end)
-                    if not ok then
-                        console:log("Client receive error, disconnecting")
-                        client = nil
-                        buffer = ""
-                        return
-                    end
-                    if data then
-                        buffer = buffer .. data
-                    elseif err then
-                        console:log("Client disconnected: " .. tostring(err))
-                        client = nil
-                        buffer = ""
-                    end
-                end)
-                client:add("error", function()
-                    if not client then return end
-                    console:log("Client socket error, disconnecting")
-                    client = nil
-                    buffer = ""
-                end)
-            end
-        end
-    end)
+    console:log("(Connection and data polling handled in frame callback)")
 
     -- Register frame callback
     callbacks:add("frame", on_frame)
