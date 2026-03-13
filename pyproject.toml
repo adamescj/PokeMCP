@@ -1,0 +1,19 @@
+[project]
+name = "mgba-mcp"
+version = "0.1.0"
+description = "MCP server for Claude to play Pokemon Fire Red via mGBA emulator"
+readme = "README.md"
+authors = [
+    { name = "Carlos Adames", email = "92492690+CeeJay-RD@users.noreply.github.com" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "fastmcp>=2.0",
+]
+
+[project.scripts]
+mgba-mcp = "mgba_mcp.server:main"
+
+[build-system]
+requires = ["uv_build>=0.10.9,<0.11.0"]
+build-backend = "uv_build"

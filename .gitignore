@@ -39,3 +39,22 @@ luac.out
 *.x86_64
 *.hex
 
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# Screenshots temp directory
+screenshots/
+
+# mGBA temp screenshots
+screenshot_mcp_*.png
+
+# Claude plans
+.claude/plans/

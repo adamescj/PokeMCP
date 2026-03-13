@@ -1,0 +1,302 @@
+"""FastMCP server exposing mGBA Pokemon Fire Red tools to Claude."""
+
+import base64
+from typing import Literal
+
+from fastmcp import FastMCP
+from fastmcp.utilities.types import Image
+
+from .connection import get_connection
+from .constants import BUTTONS
+from .game_state import (
+    format_battle_state,
+    format_game_state,
+    format_party_detail,
+    parse_badges,
+    parse_party,
+    parse_pokemon,
+)
+
+mcp = FastMCP(
+    "mGBA Pokemon FireRed",
+    instructions=(
+        "MCP server for playing Pokemon Fire Red through the mGBA emulator. "
+        "Use press_button/press_buttons to control the game, get_screenshot to see "
+        "the current screen, and get_game_state/get_party/get_battle_state to read "
+        "game data from memory. Every button press returns a screenshot showing the result."
+    ),
+)
+
+ButtonName = Literal["A", "B", "START", "SELECT", "UP", "DOWN", "LEFT", "RIGHT", "L", "R"]
+
+
+async def _screenshot_from_response(response: dict) -> Image:
+    """Extract screenshot image from a Lua server response."""
+    png_b64 = response.get("screenshot", "")
+    png_bytes = base64.b64decode(png_b64)
+    return Image(data=png_bytes, format="png")
+
+
+async def _get_screenshot() -> Image:
+    """Capture and return a screenshot."""
+    conn = get_connection()
+    await conn.ensure_connected()
+    response = await conn.send_command("screenshot")
+    return await _screenshot_from_response(response)
+
+
+async def _read_game_state_raw() -> dict:
+    """Read all game state from RAM in a single compound command."""
+    conn = get_connection()
+    await conn.ensure_connected()
+    response = await conn.send_command("get_game_state", timeout=15.0)
+    return response
+
+
+def _parse_hex_bytes(hex_string: str) -> bytes:
+    """Parse a hex string like 'a1b2c3...' into bytes."""
+    return bytes.fromhex(hex_string)
+
+
+def _build_game_state(raw: dict) -> dict:
+    """Parse raw game state response into structured data."""
+    state = {}
+
+    # Location
+    state["location"] = {
+        "x": raw.get("player_x", 0),
+        "y": raw.get("player_y", 0),
+        "bank": raw.get("map_bank", 0),
+        "number": raw.get("map_num", 0),
+    }
+
+    # Money (XOR decrypted on Lua side)
+    state["money"] = raw.get("money", 0)
+
+    # Badges
+    if "flags_data" in raw:
+        flags_bytes = _parse_hex_bytes(raw["flags_data"])
+        state["badges"] = parse_badges(flags_bytes)
+    else:
+        state["badges"] = []
+
+    # Party
+    party_count = raw.get("party_count", 0)
+    if "party_data" in raw and party_count > 0:
+        party_bytes = _parse_hex_bytes(raw["party_data"])
+        state["party"] = parse_party(party_bytes, party_count)
+    else:
+        state["party"] = []
+
+    # Battle state
+    battle_flags = raw.get("battle_flags", 0)
+    state["in_battle"] = battle_flags != 0
+
+    if state["in_battle"] and "enemy_data" in raw:
+        enemy_bytes = _parse_hex_bytes(raw["enemy_data"])
+        state["enemy_pokemon"] = parse_pokemon(enemy_bytes)
+    else:
+        state["enemy_pokemon"] = None
+
+    return state
+
+
+@mcp.tool()
+async def press_button(
+    button: ButtonName,
+    hold_frames: int = 10,
+) -> Image:
+    """Press a GBA button and return a screenshot of the result.
+
+    Args:
+        button: The button to press (A, B, START, SELECT, UP, DOWN, LEFT, RIGHT, L, R)
+        hold_frames: Number of frames to hold the button (default 10, ~167ms)
+    """
+    if button not in BUTTONS:
+        raise ValueError(f"Invalid button: {button}. Valid: {', '.join(BUTTONS.keys())}")
+
+    conn = get_connection()
+    await conn.ensure_connected()
+
+    timeout = 10.0 + (hold_frames * 0.02)
+    response = await conn.send_command(
+        "press_button",
+        timeout=timeout,
+        button=button,
+        frames=hold_frames,
+    )
+    return await _screenshot_from_response(response)
+
+
+@mcp.tool()
+async def press_buttons(
+    sequence: list[dict],
+) -> Image:
+    """Press a sequence of buttons and return a screenshot after the last one.
+
+    Useful for menu navigation like selecting options or entering text.
+
+    Args:
+        sequence: List of button presses. Each entry: {"button": "A", "hold_frames": 10, "release_frames": 5}
+                  hold_frames defaults to 10, release_frames defaults to 5.
+    """
+    validated = []
+    for entry in sequence:
+        btn = entry.get("button", "").upper()
+        if btn not in BUTTONS:
+            raise ValueError(f"Invalid button in sequence: {btn}")
+        validated.append({
+            "button": btn,
+            "hold_frames": entry.get("hold_frames", 10),
+            "release_frames": entry.get("release_frames", 5),
+        })
+
+    total_frames = sum(e["hold_frames"] + e["release_frames"] for e in validated)
+    timeout = 10.0 + (total_frames * 0.02)
+
+    conn = get_connection()
+    await conn.ensure_connected()
+    response = await conn.send_command(
+        "press_buttons",
+        timeout=timeout,
+        sequence=validated,
+    )
+    return await _screenshot_from_response(response)
+
+
+@mcp.tool()
+async def get_screenshot() -> Image:
+    """Capture the current game screen without pressing any buttons."""
+    return await _get_screenshot()
+
+
+@mcp.tool()
+async def get_game_state() -> str:
+    """Read the full game state from RAM.
+
+    Returns a summary of: player location, badges, money, party Pokemon (species,
+    level, HP, moves), and whether a battle is active.
+    """
+    raw = await _read_game_state_raw()
+    state = _build_game_state(raw)
+    return format_game_state(state)
+
+
+@mcp.tool()
+async def get_party() -> str:
+    """Get detailed info about all party Pokemon.
+
+    Returns species, level, HP, stats, moves with PP, IVs, and friendship
+    for each Pokemon in the party.
+    """
+    raw = await _read_game_state_raw()
+    state = _build_game_state(raw)
+    return format_party_detail(state.get("party", []))
+
+
+@mcp.tool()
+async def get_battle_state() -> str:
+    """Get current battle information.
+
+    Returns your active Pokemon's HP and moves with PP, and the enemy
+    Pokemon's species, level, and HP. Returns a message if not in battle.
+    """
+    raw = await _read_game_state_raw()
+    state = _build_game_state(raw)
+    return format_battle_state(state)
+
+
+@mcp.tool()
+async def save_state(slot: int = 1) -> str:
+    """Save the emulator state to a slot.
+
+    Args:
+        slot: Save slot number (1-9)
+    """
+    if not 1 <= slot <= 9:
+        raise ValueError("Slot must be between 1 and 9")
+
+    conn = get_connection()
+    await conn.ensure_connected()
+    await conn.send_command("save_state", slot=slot)
+    return f"State saved to slot {slot}."
+
+
+@mcp.tool()
+async def load_state(slot: int = 1) -> list:
+    """Load an emulator state from a slot and return a screenshot.
+
+    Args:
+        slot: Save slot number (1-9)
+    """
+    if not 1 <= slot <= 9:
+        raise ValueError("Slot must be between 1 and 9")
+
+    conn = get_connection()
+    await conn.ensure_connected()
+    response = await conn.send_command("load_state", slot=slot)
+    screenshot = await _screenshot_from_response(response)
+    return [f"State loaded from slot {slot}.", screenshot]
+
+
+@mcp.tool()
+async def wait_frames(count: int = 60) -> Image:
+    """Wait for a number of frames without input, then screenshot.
+
+    Useful for waiting through animations, text, or transitions.
+    At ~60fps, count=60 is approximately 1 second.
+
+    Args:
+        count: Number of frames to wait (default 60)
+    """
+    if count < 1:
+        count = 1
+    if count > 600:
+        count = 600  # Cap at ~10 seconds
+
+    timeout = 10.0 + (count * 0.02)
+    conn = get_connection()
+    await conn.ensure_connected()
+    response = await conn.send_command("wait_frames", timeout=timeout, count=count)
+    return await _screenshot_from_response(response)
+
+
+@mcp.tool()
+async def hold_button(
+    button: ButtonName,
+    frames: int = 30,
+) -> Image:
+    """Hold a button for an extended period and return a screenshot.
+
+    Different from press_button in that it's designed for longer holds
+    like walking multiple tiles or fast-forwarding text with B held.
+
+    Args:
+        button: The button to hold
+        frames: Number of frames to hold (default 30, ~500ms)
+    """
+    if button not in BUTTONS:
+        raise ValueError(f"Invalid button: {button}")
+
+    if frames > 300:
+        frames = 300  # Cap at ~5 seconds
+
+    timeout = 10.0 + (frames * 0.02)
+    conn = get_connection()
+    await conn.ensure_connected()
+    response = await conn.send_command(
+        "press_button",
+        timeout=timeout,
+        button=button,
+        frames=frames,
+    )
+    return await _screenshot_from_response(response)
+
+
+def main():
+    """Entry point for the MCP server."""
+    mcp.run(transport="stdio")
+
+
+if __name__ == "__main__":
+    main()
