@@ -1,32 +1,35 @@
 -- mGBA MCP Server - Lua TCP server for Pokemon Fire Red
 -- Load this script in mGBA via Tools > Scripting > File > Load Script
 -- It creates a TCP server that the Python MCP server connects to.
+--
+-- IMPORTANT: Load a ROM first, then load this script.
+-- Or load the script first — it will wait for the ROM to be ready.
 
 local PORT = 5555
 local server = nil
 local client = nil
 local buffer = ""
 local screenshot_counter = 0
+local server_started = false
 
 -- Button state tracking
 local active_keys = {}       -- {key_id = frames_remaining}
 local input_queue = {}       -- sequential button press queue
 local pending_response = nil -- response to send after input completes
 local wait_counter = 0       -- frames to wait before responding
-local wait_response_id = nil -- request id for wait response
 
--- Key name to mGBA key constant mapping
+-- GBA key constants (raw integer values, no dependency on C.GBA_KEY)
 local KEY_MAP = {
-    A = C.GBA_KEY.A,
-    B = C.GBA_KEY.B,
-    SELECT = C.GBA_KEY.SELECT,
-    START = C.GBA_KEY.START,
-    RIGHT = C.GBA_KEY.RIGHT,
-    LEFT = C.GBA_KEY.LEFT,
-    UP = C.GBA_KEY.UP,
-    DOWN = C.GBA_KEY.DOWN,
-    R = C.GBA_KEY.R,
-    L = C.GBA_KEY.L,
+    A = 0,
+    B = 1,
+    SELECT = 2,
+    START = 3,
+    RIGHT = 4,
+    LEFT = 5,
+    UP = 6,
+    DOWN = 7,
+    R = 8,
+    L = 9,
 }
 
 -- Memory addresses for Pokemon Fire Red (US v1.0 / BPRE)
@@ -47,6 +50,16 @@ local ADDR = {
     -- SaveBlock2 offsets
     SB2_MONEY_KEY = 0x0F20,
 }
+
+-- Screenshot directory (use script's own directory)
+local SCRIPT_DIR = ""
+do
+    local info = debug.getinfo(1, "S")
+    if info and info.source then
+        local src = info.source:gsub("^@", "")
+        SCRIPT_DIR = src:match("(.+)[/\\]") or "."
+    end
+end
 
 -- ============================================================
 -- Base64 encoder (pure Lua)
@@ -91,6 +104,10 @@ local function json_encode(val)
     elseif type(val) == "number" then
         if val ~= val then return "null" end  -- NaN
         if val == math.huge or val == -math.huge then return "null" end
+        -- Use integer format for whole numbers to avoid scientific notation
+        if math.type(val) == "integer" then
+            return string.format("%d", val)
+        end
         return tostring(val)
     elseif type(val) == "string" then
         local escaped = val:gsub('[\\"]', function(c) return "\\" .. c end)
@@ -119,17 +136,11 @@ local function json_encode(val)
 end
 
 local function json_decode(str)
-    -- Simple JSON decoder using Lua pattern matching
     str = str:match("^%s*(.-)%s*$")  -- trim
-
-    -- null
     if str == "null" then return nil end
-
-    -- boolean
     if str == "true" then return true end
     if str == "false" then return false end
 
-    -- number
     local num = tonumber(str)
     if num then return num end
 
@@ -144,37 +155,31 @@ local function json_decode(str)
         return s
     end
 
-    -- For objects and arrays, use a simple recursive approach
+    -- object
     if str:sub(1, 1) == "{" then
         local result = {}
         local content = str:sub(2, -2)
         if content:match("^%s*$") then return result end
 
-        -- Parse key-value pairs
         local pos = 1
         while pos <= #content do
-            -- Skip whitespace and commas
             local ws = content:match("^[%s,]*()", pos)
             if ws then pos = ws end
             if pos > #content then break end
 
-            -- Parse key (must be a string)
             local key_end = content:find(':', pos)
             if not key_end then break end
             local key_str = content:sub(pos, key_end - 1):match('^%s*"(.-)"%s*$')
             if not key_str then break end
             pos = key_end + 1
 
-            -- Skip whitespace
             ws = content:match("^%s*()", pos)
             if ws then pos = ws end
 
-            -- Parse value
             local val, new_pos = nil, pos
             local ch = content:sub(pos, pos)
 
             if ch == '"' then
-                -- String value
                 local str_end = pos + 1
                 while str_end <= #content do
                     if content:sub(str_end, str_end) == '"' and content:sub(str_end - 1, str_end - 1) ~= '\\' then
@@ -185,7 +190,6 @@ local function json_decode(str)
                 val = json_decode(content:sub(pos, str_end))
                 new_pos = str_end + 1
             elseif ch == '{' or ch == '[' then
-                -- Nested object/array - find matching bracket
                 local depth = 1
                 local bracket_end = pos + 1
                 local open = ch
@@ -199,7 +203,6 @@ local function json_decode(str)
                 val = json_decode(content:sub(pos, bracket_end - 1))
                 new_pos = bracket_end
             else
-                -- Number, boolean, null
                 local token = content:match("([^,}%]%s]+)", pos)
                 if token then
                     val = json_decode(token)
@@ -213,6 +216,7 @@ local function json_decode(str)
         return result
     end
 
+    -- array
     if str:sub(1, 1) == "[" then
         local result = {}
         local content = str:sub(2, -2)
@@ -284,14 +288,22 @@ end
 -- ============================================================
 
 local function take_screenshot()
+    if not emu then return "" end
     screenshot_counter = screenshot_counter + 1
-    local path = C.DATADIR .. "/screenshot_mcp_" .. screenshot_counter .. ".png"
+    -- Use script directory for temp screenshots
+    local path = SCRIPT_DIR .. "/screenshot_mcp_" .. screenshot_counter .. ".png"
     emu:screenshot(path)
 
     -- Read the file and base64 encode
     local f = io.open(path, "rb")
     if not f then
-        return ""
+        -- Fallback: try with backslashes on Windows
+        path = SCRIPT_DIR .. "\\screenshot_mcp_" .. screenshot_counter .. ".png"
+        f = io.open(path, "rb")
+        if not f then
+            console:error("Failed to open screenshot file: " .. path)
+            return ""
+        end
     end
     local data = f:read("*a")
     f:close()
@@ -326,7 +338,6 @@ local function handle_press_button(request)
     -- Queue the response to be sent after frames elapse + screenshot
     pending_response = { id = request.id, needs_screenshot = true }
     wait_counter = frames + 2  -- extra frames for the input to register
-    wait_response_id = request.id
 
     return nil  -- response will be sent later from frame callback
 end
@@ -343,7 +354,7 @@ local function handle_press_buttons(request)
                 key = key,
                 hold_frames = entry.hold_frames or 10,
                 release_frames = entry.release_frames or 5,
-                state = "pending",  -- pending -> holding -> releasing -> done
+                state = "pending",
                 counter = 0,
             })
         end
@@ -386,10 +397,10 @@ local function handle_get_game_state(request)
     result.map_num = emu:read8(sb1_ptr + ADDR.SB1_MAP_NUM)
     result.map_bank = emu:read8(sb1_ptr + ADDR.SB1_MAP_BANK)
 
-    -- Money (XOR encrypted)
+    -- Money (XOR encrypted) - Lua 5.4 uses ~ for XOR
     local money_raw = emu:read32(sb1_ptr + ADDR.SB1_MONEY)
     local money_key = emu:read32(sb2_ptr + ADDR.SB2_MONEY_KEY)
-    result.money = bit32.bxor(money_raw, money_key)
+    result.money = money_raw ~ money_key
 
     -- Flags (read 300 bytes starting from the flags offset, covers badge flags at bit 0x820)
     local flags_start = sb1_ptr + ADDR.SB1_FLAGS
@@ -476,7 +487,6 @@ local function process_command(line)
     if response then
         send_response(response)
     end
-    -- If response is nil, it will be sent later from the frame callback
 end
 
 local function process_buffer()
@@ -527,7 +537,6 @@ local function on_frame()
             current.counter = current.counter - 1
             if current.counter <= 0 then
                 table.remove(input_queue, 1)
-                -- Start next input if any
                 if #input_queue > 0 then
                     input_queue[1].state = "holding"
                     input_queue[1].counter = input_queue[1].hold_frames
@@ -575,17 +584,24 @@ local function on_frame()
 end
 
 -- ============================================================
--- Server setup
+-- Server setup - deferred until emulator core is ready
 -- ============================================================
 
 local function start_server()
-    -- Check game code
-    local game_code = emu:getGameCode()
-    if game_code ~= "BPRE" then
-        console:warn("WARNING: Expected Pokemon Fire Red (BPRE), got: " .. tostring(game_code))
-        console:warn("Memory addresses may be incorrect for this ROM!")
-    else
-        console:log("Detected Pokemon Fire Red (BPRE) - OK")
+    if server_started then return end
+    server_started = true
+
+    -- Check game code if emu is available
+    if emu then
+        local ok, game_code = pcall(function() return emu:getGameCode() end)
+        if ok and game_code then
+            if game_code ~= "BPRE" then
+                console:warn("WARNING: Expected Pokemon Fire Red (BPRE), got: " .. tostring(game_code))
+                console:warn("Memory addresses may be incorrect for this ROM!")
+            else
+                console:log("Detected Pokemon Fire Red (BPRE) - OK")
+            end
+        end
     end
 
     server = socket.bind("127.0.0.1", PORT)
@@ -612,5 +628,19 @@ local function start_server()
     callbacks:add("frame", on_frame)
 end
 
--- Start the server
-start_server()
+-- ============================================================
+-- Initialization: wait for emulator to be ready
+-- ============================================================
+
+-- If emu is already available (ROM loaded before script), start immediately
+if emu then
+    console:log("Emulator core detected, starting server...")
+    start_server()
+else
+    -- Wait for the "start" callback which fires when a ROM is loaded
+    console:log("Waiting for ROM to be loaded...")
+    callbacks:add("start", function()
+        console:log("ROM loaded! Starting MCP server...")
+        start_server()
+    end)
+end
