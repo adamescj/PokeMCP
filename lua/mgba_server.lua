@@ -464,9 +464,13 @@ local COMMANDS = {
 -- ============================================================
 
 local function send_response(response)
-    if client then
-        local json_str = json_encode(response) .. "\n"
-        client:send(json_str)
+    if not client then return end
+    local json_str = json_encode(response) .. "\n"
+    local ok, err = pcall(function() client:send(json_str) end)
+    if not ok then
+        console:log("Send failed: " .. tostring(err))
+        client = nil
+        buffer = ""
     end
 end
 
@@ -610,7 +614,14 @@ local function start_server()
                 buffer = ""
                 -- Register receive callback on the client socket
                 client:add("received", function()
-                    local data, err = client:receive(4096)
+                    if not client then return end
+                    local ok, data, err = pcall(function() return client:receive(4096) end)
+                    if not ok then
+                        console:log("Client receive error, disconnecting")
+                        client = nil
+                        buffer = ""
+                        return
+                    end
                     if data then
                         buffer = buffer .. data
                     elseif err then
@@ -620,6 +631,7 @@ local function start_server()
                     end
                 end)
                 client:add("error", function()
+                    if not client then return end
                     console:log("Client socket error, disconnecting")
                     client = nil
                     buffer = ""
