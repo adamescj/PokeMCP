@@ -1,0 +1,16 @@
+{
+  "permissions": {
+    "allow": [
+      "WebSearch",
+      "WebFetch(domain:mgba.io)",
+      "WebFetch(domain:www.pokecommunity.com)",
+      "WebFetch(domain:deepwiki.com)",
+      "WebFetch(domain:github.com)",
+      "Bash(uv init:*)",
+      "Bash(where.exe uv:*)",
+      "Bash(python -m uv init --package --name mgba-mcp)",
+      "Bash(python -m uv add \"fastmcp>=2.0\")",
+      "WebFetch(domain:raw.githubusercontent.com)"
+    ]
+  }
+}

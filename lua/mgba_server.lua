@@ -582,7 +582,7 @@ local function start_server()
     if emu then
         local ok, game_code = pcall(function() return emu:getGameCode() end)
         if ok and game_code then
-            if game_code ~= "BPRE" then
+            if not game_code:find("BPRE") then
                 console:warn("WARNING: Expected Pokemon Fire Red (BPRE), got: " .. tostring(game_code))
                 console:warn("Memory addresses may be incorrect for this ROM!")
             else
